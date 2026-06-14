@@ -28,6 +28,7 @@ export const CenterCanvas: React.FC<{
 
   const trajectory = useAppStore((s) => s.trajectory)
   const filter = useAppStore((s) => s.filter)
+  const forceConfig = useAppStore((s) => s.forceConfig)
   const error = useAppStore((s) => s.error)
   const loading = useAppStore((s) => s.loading)
   const autoRotate = useAppStore((s) => s.autoRotate)
@@ -107,6 +108,10 @@ export const CenterCanvas: React.FC<{
   useEffect(() => {
     cameraCtrlRef.current?.setAutoRotate(autoRotate)
   }, [autoRotate])
+
+  useEffect(() => {
+    kernelRef.current?.setForceConfig(forceConfig)
+  }, [forceConfig])
 
   useEffect(() => {
     const offCamera = eventBus.on('CAMERA_STATE_CHANGED', (state: CameraState) => {

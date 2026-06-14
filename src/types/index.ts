@@ -83,6 +83,7 @@ export type EventName =
   | 'EXPORT_REQUESTED'
   | 'RENDER_PERFORMANCE'
   | 'AUTO_ROTATE_TOGGLED'
+  | 'FORCE_VISUALIZATION_CHANGED'
   | 'ERROR'
 
 export interface EventPayloadMap {
@@ -96,6 +97,7 @@ export interface EventPayloadMap {
   EXPORT_REQUESTED: ExportOptions
   RENDER_PERFORMANCE: RenderPerformance
   AUTO_ROTATE_TOGGLED: boolean
+  FORCE_VISUALIZATION_CHANGED: ForceVisualizationConfig
   ERROR: { message: string; code?: string }
 }
 
@@ -106,4 +108,28 @@ export interface ElementMaterialConfig {
   roughness: number
   emissive?: string
   emissiveIntensity?: number
+}
+
+export interface ForceVector {
+  atomId1: number
+  atomId2: number
+  x1: number
+  y1: number
+  z1: number
+  x2: number
+  y2: number
+  z2: number
+  magnitude: number
+  type: 'attractive' | 'repulsive'
+}
+
+export interface ForceVisualizationConfig {
+  enabled: boolean
+  showAttractive: boolean
+  showRepulsive: boolean
+  minMagnitude: number
+  maxMagnitude: number
+  arrowScale: number
+  showLabels: boolean
+  labelThreshold: number
 }

@@ -1,9 +1,21 @@
 import React from 'react'
 import { ElementFilter } from '@/components/panels/ElementFilter'
+import { ForcePanel } from '@/components/panels/ForcePanel'
 
 export const RightPanel: React.FC = () => {
   return (
     <aside className="relative z-10 flex h-full w-[280px] shrink-0 flex-col gap-4 overflow-y-auto border-l border-slate-800/80 bg-slate-950/60 backdrop-blur-xl p-4 custom-scrollbar">
+      <section className="space-y-2">
+        <div className="flex items-center gap-2 px-0.5">
+          <div className="h-px flex-1 bg-gradient-to-r from-slate-700/60 via-slate-700/60 to-transparent" />
+          <span className="text-[10px] uppercase tracking-[0.25em] text-slate-500 font-mono">
+            作用力矢量
+          </span>
+          <div className="h-px flex-1 bg-gradient-to-l from-slate-700/60 via-slate-700/60 to-transparent" />
+        </div>
+        <ForcePanel />
+      </section>
+
       <section className="space-y-2 flex-1 min-h-0 flex flex-col">
         <div className="flex items-center gap-2 px-0.5">
           <div className="h-px flex-1 bg-gradient-to-r from-slate-700/60 via-slate-700/60 to-transparent" />
@@ -12,7 +24,7 @@ export const RightPanel: React.FC = () => {
           </span>
           <div className="h-px flex-1 bg-gradient-to-l from-slate-700/60 via-slate-700/60 to-transparent" />
         </div>
-        <div className="flex-1 min-h-0">
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1 custom-scrollbar">
           <ElementFilter />
         </div>
       </section>

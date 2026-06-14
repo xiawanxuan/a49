@@ -1,7 +1,8 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import type { Atom, Bond, Frame, Trajectory, ElementFilter } from '@/types'
-import { getElementConfig, getElementColor, HIGHLIGHT_CONFIG, BOND_MATERIAL, HIGHLIGHTED_BOND_MATERIAL } from '@/utils/MaterialConfig'
+import type { Atom, Bond, Frame, Trajectory, ElementFilter, ForceVector, ForceVisualizationConfig } from '@/types'
+import { getElementConfig, getElementColor, getElementRadius, HIGHLIGHT_CONFIG, BOND_MATERIAL, HIGHLIGHTED_BOND_MATERIAL } from '@/utils/MaterialConfig'
+import { ForceCalculator } from './ForceCalculator'
 import eventBus from '@/utils/EventBus'
 
 interface ElementGroup {
@@ -42,6 +43,27 @@ export class RenderKernel {
   private normalBondMeshes: THREE.InstancedMesh[] = []
   private highlightBondMeshes: THREE.InstancedMesh[] = []
   private hideDummy: THREE.Object3D = new THREE.Object3D()
+
+  private forceCalculator: ForceCalculator = new ForceCalculator()
+  private forceGroup: THREE.Group = new THREE.Group()
+  private forceShaftGeometry: THREE.CylinderGeometry
+  private forceHeadGeometry: THREE.ConeGeometry
+  private attractiveShaftMeshes: THREE.InstancedMesh[] = []
+  private attractiveHeadMeshes: THREE.InstancedMesh[] = []
+  private repulsiveShaftMeshes: THREE.InstancedMesh[] = []
+  private repulsiveHeadMeshes: THREE.InstancedMesh[] = []
+  private forceConfig: ForceVisualizationConfig = {
+    enabled: false,
+    showAttractive: true,
+    showRepulsive: true,
+    minMagnitude: 0.01,
+    maxMagnitude: 10.0,
+    arrowScale: 1.0,
+    showLabels: false,
+    labelThreshold: 1.0,
+  }
+  private currentForces: ForceVector[] = []
+  private forceDummy: THREE.Object3D = new THREE.Object3D()
 
   private frameTimeSamples: number[] = []
   private lastFrameTime = 0
@@ -98,11 +120,17 @@ export class RenderKernel {
 
     this.atomGroupParent.name = 'Atoms'
     this.bondGroup.name = 'Bonds'
+    this.forceGroup.name = 'Forces'
     this.scene.add(this.atomGroupParent)
     this.scene.add(this.bondGroup)
+    this.scene.add(this.forceGroup)
 
     this.hideDummy.scale.setScalar(0)
     this.hideDummy.updateMatrix()
+
+    this.forceShaftGeometry = new THREE.CylinderGeometry(1, 1, 1, 8, 1, false)
+    this.forceHeadGeometry = new THREE.ConeGeometry(1, 1, 8, 1, false)
+    this.forceGroup.visible = false
 
     this.resizeObserver = new ResizeObserver(() => this.onResize())
     this.resizeObserver.observe(container)
@@ -177,6 +205,27 @@ export class RenderKernel {
     }
     this.normalBondMeshes = []
     this.highlightBondMeshes = []
+
+    this.disposeForceMeshes()
+  }
+
+  private disposeForceMeshes() {
+    const disposePool = (pool: THREE.InstancedMesh[]) => {
+      for (const m of pool) {
+        m.geometry.dispose()
+        ;(m.material as THREE.Material).dispose()
+        this.forceGroup.remove(m)
+      }
+    }
+    disposePool(this.attractiveShaftMeshes)
+    disposePool(this.attractiveHeadMeshes)
+    disposePool(this.repulsiveShaftMeshes)
+    disposePool(this.repulsiveHeadMeshes)
+    this.attractiveShaftMeshes = []
+    this.attractiveHeadMeshes = []
+    this.repulsiveShaftMeshes = []
+    this.repulsiveHeadMeshes = []
+    this.currentForces = []
   }
 
   private clearBonds() {
@@ -254,6 +303,19 @@ export class RenderKernel {
     if (this.currentFrame) {
       this.updateAtoms(this.currentFrame)
       this.updateBonds(this.currentFrame)
+      if (this.forceConfig.enabled) {
+        this.updateForceArrows(this.currentFrame)
+      }
+    }
+  }
+
+  setForceConfig(config: ForceVisualizationConfig) {
+    this.forceConfig = config
+    if (config.enabled && this.currentFrame) {
+      this.updateForceArrows(this.currentFrame)
+      this.forceGroup.visible = true
+    } else {
+      this.forceGroup.visible = false
     }
   }
 
@@ -266,6 +328,9 @@ export class RenderKernel {
     this.currentFrame = frame
     this.updateAtoms(frame)
     this.updateBonds(frame)
+    if (this.forceConfig.enabled) {
+      this.updateForceArrows(frame)
+    }
   }
 
   private updateAtoms(frame: Frame) {
@@ -475,6 +540,177 @@ export class RenderKernel {
     return [arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7], arr[8], arr[9], arr[10], arr[11], arr[12], arr[13], arr[14], arr[15]]
   }
 
+  private updateForceArrows(frame: Frame) {
+    const visibleAtoms = frame.atoms.filter((a) => this.filter.visibleElements.has(a.element))
+    const forces = this.forceCalculator.calculateForces(visibleAtoms, this.forceConfig)
+    this.currentForces = forces
+
+    const attractiveForces = forces.filter((f) => f.type === 'attractive')
+    const repulsiveForces = forces.filter((f) => f.type === 'repulsive')
+
+    const MAX_FORCES_PER_MESH = 1000
+    const scale = this.forceConfig.arrowScale
+    const shaftRadius = 0.04 * scale
+    const headRadius = 0.12 * scale
+    const headLength = 0.35 * scale
+
+    const attractiveShaftMatrices: number[][] = []
+    const attractiveHeadMatrices: number[][] = []
+    const repulsiveShaftMatrices: number[][] = []
+    const repulsiveHeadMatrices: number[][] = []
+
+    for (const force of attractiveForces) {
+      const shaftMat = this.computeForceShaftMatrix(force, shaftRadius)
+      const headMat = this.computeForceHeadMatrix(force, headRadius, headLength)
+      attractiveShaftMatrices.push(shaftMat)
+      attractiveHeadMatrices.push(headMat)
+    }
+
+    for (const force of repulsiveForces) {
+      const shaftMat = this.computeForceShaftMatrix(force, shaftRadius)
+      const headMat = this.computeForceHeadMatrix(force, headRadius, headLength)
+      repulsiveShaftMatrices.push(shaftMat)
+      repulsiveHeadMatrices.push(headMat)
+    }
+
+    const attractiveColor = 0x00e5ff
+    const repulsiveColor = 0xff6b35
+
+    this.updateForceMeshPool(
+      this.attractiveShaftMeshes,
+      this.forceShaftGeometry,
+      attractiveShaftMatrices,
+      attractiveColor,
+      MAX_FORCES_PER_MESH,
+    )
+    this.updateForceMeshPool(
+      this.attractiveHeadMeshes,
+      this.forceHeadGeometry,
+      attractiveHeadMatrices,
+      attractiveColor,
+      MAX_FORCES_PER_MESH,
+    )
+    this.updateForceMeshPool(
+      this.repulsiveShaftMeshes,
+      this.forceShaftGeometry,
+      repulsiveShaftMatrices,
+      repulsiveColor,
+      MAX_FORCES_PER_MESH,
+    )
+    this.updateForceMeshPool(
+      this.repulsiveHeadMeshes,
+      this.forceHeadGeometry,
+      repulsiveHeadMatrices,
+      repulsiveColor,
+      MAX_FORCES_PER_MESH,
+    )
+  }
+
+  private computeForceShaftMatrix(force: ForceVector, radius: number): number[] {
+    const midX = (force.x1 + force.x2) / 2
+    const midY = (force.y1 + force.y2) / 2
+    const midZ = (force.z1 + force.z2) / 2
+
+    const dx = force.x2 - force.x1
+    const dy = force.y2 - force.y1
+    const dz = force.z2 - force.z1
+    const length = Math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    this.forceDummy.position.set(midX, midY, midZ)
+    this.forceDummy.scale.set(radius, length * 0.7, radius)
+
+    const up = new THREE.Vector3(0, 1, 0)
+    const dir = new THREE.Vector3(dx, dy, dz).normalize()
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, dir)
+    this.forceDummy.quaternion.copy(quat)
+    this.forceDummy.updateMatrix()
+
+    const arr = this.forceDummy.matrix.elements
+    return [arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7], arr[8], arr[9], arr[10], arr[11], arr[12], arr[13], arr[14], arr[15]]
+  }
+
+  private computeForceHeadMatrix(force: ForceVector, radius: number, headLength: number): number[] {
+    const dx = force.x2 - force.x1
+    const dy = force.y2 - force.y1
+    const dz = force.z2 - force.z1
+    const length = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    const dirX = dx / length
+    const dirY = dy / length
+    const dirZ = dz / length
+
+    const headPosX = force.x1 + dirX * length * 0.85
+    const headPosY = force.y1 + dirY * length * 0.85
+    const headPosZ = force.z1 + dirZ * length * 0.85
+
+    this.forceDummy.position.set(headPosX, headPosY, headPosZ)
+    this.forceDummy.scale.set(radius, headLength, radius)
+
+    const up = new THREE.Vector3(0, 1, 0)
+    const dir = new THREE.Vector3(dirX, dirY, dirZ)
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, dir)
+    this.forceDummy.quaternion.copy(quat)
+    this.forceDummy.updateMatrix()
+
+    const arr = this.forceDummy.matrix.elements
+    return [arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7], arr[8], arr[9], arr[10], arr[11], arr[12], arr[13], arr[14], arr[15]]
+  }
+
+  private updateForceMeshPool(
+    pool: THREE.InstancedMesh[],
+    geometry: THREE.BufferGeometry,
+    matrices: number[][],
+    color: number,
+    maxPerMesh: number,
+  ) {
+    const total = matrices.length
+    const requiredMeshes = total > 0 ? Math.ceil(total / maxPerMesh) : 0
+
+    while (pool.length < requiredMeshes) {
+      const mat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.8,
+      })
+      const mesh = new THREE.InstancedMesh(geometry, mat, maxPerMesh)
+      mesh.frustumCulled = false
+      mesh.count = 0
+      this.forceGroup.add(mesh)
+      pool.push(mesh)
+    }
+
+    let matrixOffset = 0
+    for (let meshIndex = 0; meshIndex < pool.length; meshIndex++) {
+      const mesh = pool[meshIndex]
+      const remaining = total - matrixOffset
+      const prevCount = mesh.count
+
+      if (remaining <= 0) {
+        if (prevCount > 0) {
+          for (let i = 0; i < prevCount; i++) {
+            mesh.setMatrixAt(i, this.hideDummy.matrix)
+          }
+          mesh.instanceMatrix.needsUpdate = true
+        }
+        mesh.count = 0
+        continue
+      }
+
+      const count = Math.min(maxPerMesh, remaining)
+      for (let i = 0; i < count; i++) {
+        const m = new THREE.Matrix4().fromArray(matrices[matrixOffset + i])
+        mesh.setMatrixAt(i, m)
+      }
+      if (count < prevCount) {
+        for (let i = count; i < prevCount; i++) {
+          mesh.setMatrixAt(i, this.hideDummy.matrix)
+        }
+      }
+      mesh.count = count
+      mesh.instanceMatrix.needsUpdate = true
+      matrixOffset += count
+    }
+  }
+
   setAutoRotate(enabled: boolean) {
     this.autoRotate = enabled
     this.controls.autoRotate = enabled
@@ -550,6 +786,18 @@ export class RenderKernel {
     }
   }
 
+  getCurrentForceCount(): number {
+    return this.currentForces.length
+  }
+
+  getAttractiveForceCount(): number {
+    return this.currentForces.filter((f) => f.type === 'attractive').length
+  }
+
+  getRepulsiveForceCount(): number {
+    return this.currentForces.filter((f) => f.type === 'repulsive').length
+  }
+
   dispose() {
     this.disposed = true
     cancelAnimationFrame(this.animationRaf)
@@ -558,6 +806,9 @@ export class RenderKernel {
     this.controls.dispose()
     this.sphereGeometry.dispose()
     this.cylinderGeometry.dispose()
+    this.forceShaftGeometry.dispose()
+    this.forceHeadGeometry.dispose()
+    this.forceCalculator.dispose()
     this.renderer.dispose()
     if (this.renderer.domElement.parentNode === this.container) {
       this.container.removeChild(this.renderer.domElement)

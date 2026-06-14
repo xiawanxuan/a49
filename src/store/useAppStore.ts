@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Trajectory, CameraState, PlaybackState, ElementFilter } from '@/types'
+import type { Trajectory, CameraState, PlaybackState, ElementFilter, ForceVisualizationConfig } from '@/types'
 import eventBus from '@/utils/EventBus'
 
 interface AppState {
@@ -8,6 +8,7 @@ interface AppState {
   filter: ElementFilter
   cameraPresets: CameraState[]
   autoRotate: boolean
+  forceConfig: ForceVisualizationConfig
   loading: boolean
   error: string | null
 
@@ -21,6 +22,7 @@ interface AppState {
   addCameraPreset: (preset: CameraState) => void
   deleteCameraPreset: (id: string) => void
   toggleAutoRotate: () => void
+  setForceConfig: (partial: Partial<ForceVisualizationConfig>) => void
   setLoading: (v: boolean) => void
   setError: (e: string | null) => void
 }
@@ -40,6 +42,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   cameraPresets: [],
   autoRotate: false,
+  forceConfig: {
+    enabled: false,
+    showAttractive: true,
+    showRepulsive: true,
+    minMagnitude: 0.01,
+    maxMagnitude: 10.0,
+    arrowScale: 1.0,
+    showLabels: false,
+    labelThreshold: 1.0,
+  },
   loading: false,
   error: null,
 
@@ -135,6 +147,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     const v = !get().autoRotate
     set({ autoRotate: v })
     eventBus.emit('AUTO_ROTATE_TOGGLED', v)
+  },
+
+  setForceConfig: (partial) => {
+    const newConfig = { ...get().forceConfig, ...partial }
+    set({ forceConfig: newConfig })
+    eventBus.emit('FORCE_VISUALIZATION_CHANGED', newConfig)
   },
 
   setLoading: (v) => set({ loading: v }),

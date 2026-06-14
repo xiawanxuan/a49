@@ -11,6 +11,8 @@ interface ElementGroup {
   dummy: THREE.Object3D
   normalCount: number
   highlightCount: number
+  normalColorDirty: boolean
+  highlightColorDirty: boolean
 }
 
 export class RenderKernel {
@@ -36,6 +38,10 @@ export class RenderKernel {
   private cylinderGeometry: THREE.CylinderGeometry
   private bondDummy: THREE.Object3D = new THREE.Object3D()
   private idMaps: WeakMap<THREE.InstancedMesh, Map<number, number>> = new WeakMap()
+
+  private normalBondMeshes: THREE.InstancedMesh[] = []
+  private highlightBondMeshes: THREE.InstancedMesh[] = []
+  private hideDummy: THREE.Object3D = new THREE.Object3D()
 
   private frameTimeSamples: number[] = []
   private lastFrameTime = 0
@@ -94,6 +100,9 @@ export class RenderKernel {
     this.bondGroup.name = 'Bonds'
     this.scene.add(this.atomGroupParent)
     this.scene.add(this.bondGroup)
+
+    this.hideDummy.scale.setScalar(0)
+    this.hideDummy.updateMatrix()
 
     this.resizeObserver = new ResizeObserver(() => this.onResize())
     this.resizeObserver.observe(container)
@@ -155,7 +164,19 @@ export class RenderKernel {
       this.atomGroupParent.remove(group.highlightMesh)
     }
     this.atomGroups.clear()
-    this.clearBonds()
+
+    for (const m of this.normalBondMeshes) {
+      m.geometry.dispose()
+      ;(m.material as THREE.Material).dispose()
+      this.bondGroup.remove(m)
+    }
+    for (const m of this.highlightBondMeshes) {
+      m.geometry.dispose()
+      ;(m.material as THREE.Material).dispose()
+      this.bondGroup.remove(m)
+    }
+    this.normalBondMeshes = []
+    this.highlightBondMeshes = []
   }
 
   private clearBonds() {
@@ -213,6 +234,8 @@ export class RenderKernel {
         dummy: new THREE.Object3D(),
         normalCount: 0,
         highlightCount: 0,
+        normalColorDirty: false,
+        highlightColorDirty: false,
       })
     }
   }
@@ -246,81 +269,99 @@ export class RenderKernel {
   }
 
   private updateAtoms(frame: Frame) {
+    const groupIndices = new Map<ElementGroup, { normalIdx: number; highlightIdx: number }>()
+
     for (const group of this.atomGroups.values()) {
-      group.normalCount = 0
-      group.highlightCount = 0
+      group.normalColorDirty = false
+      group.highlightColorDirty = false
       this.idMaps.get(group.normalMesh)!.clear()
       this.idMaps.get(group.highlightMesh)!.clear()
+      groupIndices.set(group, { normalIdx: 0, highlightIdx: 0 })
     }
 
     for (const atom of frame.atoms) {
       const group = this.atomGroups.get(atom.element)
       if (!group) continue
 
+      const isVisible = this.filter.visibleElements.has(atom.element)
+      if (!isVisible) continue
+
       const elementColor = getElementColor(atom.element, this.filter.customColors)
       const baseConfig = getElementConfig(atom.element)
       const radius = baseConfig.radius
       const isHighlighted = this.filter.highlightedElements.has(atom.element)
-      const isVisible = this.filter.visibleElements.has(atom.element)
-
-      if (!isVisible) continue
 
       group.dummy.position.set(atom.x, atom.y, atom.z)
       group.dummy.scale.setScalar(radius)
       group.dummy.rotation.set(0, 0, 0)
       group.dummy.updateMatrix()
 
+      const idx = groupIndices.get(group)!
       const colorMatched = elementColor.toLowerCase() === baseConfig.color.toLowerCase()
       const normalIdMap = this.idMaps.get(group.normalMesh)!
       const highlightIdMap = this.idMaps.get(group.highlightMesh)!
 
       if (isHighlighted) {
-        group.highlightMesh.setMatrixAt(group.highlightCount, group.dummy.matrix)
-        highlightIdMap.set(group.highlightCount, atom.id)
-        group.highlightCount++
+        group.highlightMesh.setMatrixAt(idx.highlightIdx, group.dummy.matrix)
+        highlightIdMap.set(idx.highlightIdx, atom.id)
         if (!colorMatched) {
           const c = new THREE.Color(elementColor)
-          group.highlightMesh.setColorAt(group.highlightCount - 1, c)
+          group.highlightMesh.setColorAt(idx.highlightIdx, c)
+          group.highlightColorDirty = true
         }
+        idx.highlightIdx++
       } else {
-        group.normalMesh.setMatrixAt(group.normalCount, group.dummy.matrix)
-        normalIdMap.set(group.normalCount, atom.id)
-        group.normalCount++
+        group.normalMesh.setMatrixAt(idx.normalIdx, group.dummy.matrix)
+        normalIdMap.set(idx.normalIdx, atom.id)
         if (!colorMatched) {
           const c = new THREE.Color(elementColor)
-          group.normalMesh.setColorAt(group.normalCount - 1, c)
+          group.normalMesh.setColorAt(idx.normalIdx, c)
+          group.normalColorDirty = true
         }
+        idx.normalIdx++
       }
     }
 
     for (const group of this.atomGroups.values()) {
-      group.normalMesh.count = group.normalCount
-      group.highlightMesh.count = group.highlightCount
-      group.normalMesh.instanceMatrix.needsUpdate = true
-      group.highlightMesh.instanceMatrix.needsUpdate = true
-      if (group.normalMesh.instanceColor) group.normalMesh.instanceColor.needsUpdate = true
-      if (group.highlightMesh.instanceColor) group.highlightMesh.instanceColor.needsUpdate = true
+      const idx = groupIndices.get(group)!
+      const newNormalCount = idx.normalIdx
+      const newHighlightCount = idx.highlightIdx
+      const prevNormalCount = group.normalCount
+      const prevHighlightCount = group.highlightCount
+
+      for (let i = newNormalCount; i < prevNormalCount; i++) {
+        group.normalMesh.setMatrixAt(i, this.hideDummy.matrix)
+      }
+      for (let i = newHighlightCount; i < prevHighlightCount; i++) {
+        group.highlightMesh.setMatrixAt(i, this.hideDummy.matrix)
+      }
+
+      group.normalCount = newNormalCount
+      group.highlightCount = newHighlightCount
+      group.normalMesh.count = newNormalCount
+      group.highlightMesh.count = newHighlightCount
+
+      const normalMatrixChanged = newNormalCount > 0 || prevNormalCount > 0
+      const highlightMatrixChanged = newHighlightCount > 0 || prevHighlightCount > 0
+      if (normalMatrixChanged) {
+        group.normalMesh.instanceMatrix.needsUpdate = true
+      }
+      if (highlightMatrixChanged) {
+        group.highlightMesh.instanceMatrix.needsUpdate = true
+      }
+      if (group.normalColorDirty && group.normalMesh.instanceColor) {
+        group.normalMesh.instanceColor.needsUpdate = true
+      }
+      if (group.highlightColorDirty && group.highlightMesh.instanceColor) {
+        group.highlightMesh.instanceColor.needsUpdate = true
+      }
     }
   }
 
   private updateBonds(frame: Frame) {
-    this.clearBonds()
     const bonds = frame.bonds
     const atomIndex = new Map<number, Atom>()
     for (const a of frame.atoms) atomIndex.set(a.id, a)
-
-    const bondMaterial = new THREE.MeshStandardMaterial({
-      color: BOND_MATERIAL.color,
-      metalness: BOND_MATERIAL.metalness,
-      roughness: BOND_MATERIAL.roughness,
-    })
-    const hiMaterial = new THREE.MeshStandardMaterial({
-      color: HIGHLIGHTED_BOND_MATERIAL.color,
-      metalness: HIGHLIGHTED_BOND_MATERIAL.metalness,
-      roughness: HIGHLIGHTED_BOND_MATERIAL.roughness,
-      emissive: new THREE.Color(HIGHLIGHTED_BOND_MATERIAL.emissive!),
-      emissiveIntensity: HIGHLIGHTED_BOND_MATERIAL.emissiveIntensity ?? 0,
-    })
 
     const MAX_BONDS_PER_MESH = 500
     const normalBondMatrices: number[][] = []
@@ -343,11 +384,69 @@ export class RenderKernel {
       else normalBondMatrices.push(matrix)
     }
 
-    this.createBondInstancedMeshes(normalBondMatrices, bondMaterial, MAX_BONDS_PER_MESH)
-    this.createBondInstancedMeshes(highlightBondMatrices, hiMaterial, MAX_BONDS_PER_MESH)
+    this.updateBondMeshPool(this.normalBondMeshes, normalBondMatrices, BOND_MATERIAL, MAX_BONDS_PER_MESH)
+    this.updateBondMeshPool(this.highlightBondMeshes, highlightBondMatrices, HIGHLIGHTED_BOND_MATERIAL, MAX_BONDS_PER_MESH)
+  }
 
-    bondMaterial.dispose()
-    hiMaterial.dispose()
+  private updateBondMeshPool(
+    pool: THREE.InstancedMesh[],
+    matrices: number[][],
+    materialConfig: typeof BOND_MATERIAL,
+    maxPerMesh: number,
+  ) {
+    const total = matrices.length
+    const requiredMeshes = total > 0 ? Math.ceil(total / maxPerMesh) : 0
+
+    while (pool.length < requiredMeshes) {
+      const isHighlight = materialConfig === HIGHLIGHTED_BOND_MATERIAL
+      const matProps: THREE.MeshStandardMaterialParameters = {
+        color: materialConfig.color,
+        metalness: materialConfig.metalness,
+        roughness: materialConfig.roughness,
+      }
+      if (isHighlight) {
+        matProps.emissive = new THREE.Color(HIGHLIGHTED_BOND_MATERIAL.emissive!)
+        matProps.emissiveIntensity = HIGHLIGHTED_BOND_MATERIAL.emissiveIntensity ?? 0
+      }
+      const mat = new THREE.MeshStandardMaterial(matProps)
+      const mesh = new THREE.InstancedMesh(this.cylinderGeometry, mat, maxPerMesh)
+      mesh.frustumCulled = false
+      mesh.count = 0
+      this.bondGroup.add(mesh)
+      pool.push(mesh)
+    }
+
+    let matrixOffset = 0
+    for (let meshIndex = 0; meshIndex < pool.length; meshIndex++) {
+      const mesh = pool[meshIndex]
+      const remaining = total - matrixOffset
+      const prevCount = mesh.count
+
+      if (remaining <= 0) {
+        if (prevCount > 0) {
+          for (let i = 0; i < prevCount; i++) {
+            mesh.setMatrixAt(i, this.hideDummy.matrix)
+          }
+          mesh.instanceMatrix.needsUpdate = true
+        }
+        mesh.count = 0
+        continue
+      }
+
+      const count = Math.min(maxPerMesh, remaining)
+      for (let i = 0; i < count; i++) {
+        const m = new THREE.Matrix4().fromArray(matrices[matrixOffset + i])
+        mesh.setMatrixAt(i, m)
+      }
+      if (count < prevCount) {
+        for (let i = count; i < prevCount; i++) {
+          mesh.setMatrixAt(i, this.hideDummy.matrix)
+        }
+      }
+      mesh.count = count
+      mesh.instanceMatrix.needsUpdate = true
+      matrixOffset += count
+    }
   }
 
   private computeBondMatrix(
@@ -374,26 +473,6 @@ export class RenderKernel {
 
     const arr = this.bondDummy.matrix.elements
     return [arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7], arr[8], arr[9], arr[10], arr[11], arr[12], arr[13], arr[14], arr[15]]
-  }
-
-  private createBondInstancedMeshes(matrices: number[][], material: THREE.Material, maxPerMesh: number) {
-    if (matrices.length === 0) return
-    const total = matrices.length
-    let offset = 0
-    while (offset < total) {
-      const count = Math.min(maxPerMesh, total - offset)
-      const mat = material.clone()
-      const mesh = new THREE.InstancedMesh(this.cylinderGeometry, mat, count)
-      mesh.frustumCulled = false
-      for (let i = 0; i < count; i++) {
-        const m = new THREE.Matrix4().fromArray(matrices[offset + i])
-        mesh.setMatrixAt(i, m)
-      }
-      mesh.count = count
-      mesh.instanceMatrix.needsUpdate = true
-      this.bondGroup.add(mesh)
-      offset += count
-    }
   }
 
   setAutoRotate(enabled: boolean) {
